@@ -407,12 +407,30 @@ with ch_left:
 with ch_right:
     st.markdown("**Status by Team Member**")
     if not fdf.empty:
+        # Build a per-(member, state) task list for the hover tooltip
+        _tmp = fdf.copy()
+        _tmp["task_line"] = (
+            _tmp["id"].astype(str)
+            + " — "
+            + _tmp["summary"].str[:60].where(
+                _tmp["summary"].str.len() <= 60,
+                _tmp["summary"].str[:60] + "…",
+            )
+        )
+        task_details = (
+            _tmp.groupby(["member_name", "state"])["task_line"]
+            .apply(lambda lines: "<br>".join(lines))
+            .reset_index(name="task_list")
+        )
+
         ms = (
             fdf.groupby(["member_name", "state"])
             .size()
             .reset_index(name="Count")
         )
+        ms = ms.merge(task_details, on=["member_name", "state"])
         ms["label"] = ms["member_name"].str.split().str[0]
+
         MUTED_STATE = {
             "To Do":       "#BDBDBD",
             "In Progress": "#5B8DB8",
@@ -424,6 +442,25 @@ with ch_right:
             ms, x="label", y="Count", color="state",
             barmode="stack", color_discrete_map=MUTED_STATE,
             template=plotly_template,
+            custom_data=["member_name", "state", "Count", "task_list"],
+        )
+        fig.update_traces(
+            hovertemplate=(
+                "<span style='font-size:13px; font-weight:700;'>"
+                "%{customdata[0]}</span>"
+                "<br>"
+                "<span style='font-size:11px; color:#888;'>%{customdata[1]}"
+                " &nbsp;·&nbsp; %{customdata[2]} task(s)</span>"
+                "<br><br>"
+                "%{customdata[3]}"
+                "<extra></extra>"
+            ),
+            hoverlabel=dict(
+                bgcolor="#1A1A1A",
+                bordercolor="#C8102E",
+                font=dict(family="Inter, Segoe UI, Arial, sans-serif",
+                          size=12, color="#FFFFFF"),
+            ),
         )
         fig = aon_layout(fig, height=300)
         fig.update_layout(
