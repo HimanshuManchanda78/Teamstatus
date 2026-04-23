@@ -255,24 +255,13 @@ with st.sidebar:
     sel_task_types = st.multiselect("Task Type", all_task_types, default=all_task_types)
 
     st.divider()
-    st.markdown('<p class="aon-section-title">Date Range</p>', unsafe_allow_html=True)
-    min_d = df["created_date"].min().date()
-    max_d = df["created_date"].max().date()
-    date_range = st.date_input(
-        "Created Date Range",
-        value=(min_d, max_d),
-        min_value=min_d,
-        max_value=max_d,
-    )
-
-    st.divider()
     st.markdown(
         f'<p style="font-size:0.68rem; color:#666; text-align:center;">'
         f'© {date.today().year} Aon plc. All rights reserved.</p>',
         unsafe_allow_html=True,
     )
 
-# ── Apply filters ─────────────────────────────────────────────────────────────
+# ── Apply sidebar filters (date applied after header widget) ──────────────────
 fdf = df[
     df["member_name"].isin(sel_members)
     & df["project"].isin(sel_projects)
@@ -281,17 +270,11 @@ fdf = df[
     & df["task_type"].isin(sel_task_types)
 ].copy()
 
-if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-    fdf = fdf[
-        (fdf["created_date"].dt.date >= date_range[0])
-        & (fdf["created_date"].dt.date <= date_range[1])
-    ]
-elif isinstance(date_range, date):
-    st.sidebar.warning("Select an end date to complete the date range filter.")
-    fdf = fdf[fdf["created_date"].dt.date >= date_range]
+# ── Page header with inline Date Range picker ─────────────────────────────────
+min_d = df["created_date"].min().date()
+max_d = df["created_date"].max().date()
 
-# ── Page header ───────────────────────────────────────────────────────────────
-col_logo, col_title = st.columns([1, 9])
+col_logo, col_title, col_date = st.columns([1, 5, 3])
 with col_logo:
     st.markdown(
         '<div style="font-size:2.6rem; font-weight:900; color:#C8102E; '
@@ -312,6 +295,23 @@ with col_title:
         """,
         unsafe_allow_html=True,
     )
+with col_date:
+    date_range = st.date_input(
+        "Date Range",
+        value=(min_d, max_d),
+        min_value=min_d,
+        max_value=max_d,
+    )
+
+# Apply date filter
+if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+    fdf = fdf[
+        (fdf["created_date"].dt.date >= date_range[0])
+        & (fdf["created_date"].dt.date <= date_range[1])
+    ]
+elif isinstance(date_range, date):
+    st.warning("Select an end date to complete the date range filter.")
+    fdf = fdf[fdf["created_date"].dt.date >= date_range]
 
 st.markdown(
     f'<p style="font-size:0.78rem; color:#888; margin-top:8px;">'
@@ -334,88 +334,78 @@ k6.metric("In Review",    int(state_counts.get("In Review",   0)))
 
 st.divider()
 
-# ── Charts – row 1 ────────────────────────────────────────────────────────────
-st.markdown('<p class="aon-section-title">Overview Analytics</p>',
-            unsafe_allow_html=True)
+# ── Team Summary Table ────────────────────────────────────────────────────────
+st.markdown('<p class="aon-section-title">Team Summary</p>', unsafe_allow_html=True)
 
-ch1, ch2, ch3 = st.columns(3)
+if not fdf.empty:
+    state_order = ["To Do", "In Progress", "In Review", "Blocked", "Done"]
+    pivot = (
+        fdf.groupby(["member_name", "state"])
+        .size()
+        .unstack(fill_value=0)
+        .reindex(columns=[s for s in state_order if s in fdf["state"].unique()], fill_value=0)
+    )
+    pivot.index.name = "Team Member"
+    pivot["Total"] = pivot.sum(axis=1)
+    pivot["% Done"] = (pivot.get("Done", 0) / pivot["Total"] * 100).round(1).astype(str) + "%"
+    pivot = pivot.reset_index()
 
-with ch1:
-    st.markdown("**Tasks per Team Member**")
-    if not fdf.empty:
-        data = fdf.groupby("member_name").size().reset_index(name="Tasks")
-        data["label"] = data["member_name"].str.split().str[0]
-        fig = px.bar(
-            data, x="label", y="Tasks", color="label",
-            color_discrete_sequence=AON_CHART_SEQ,
-            template=plotly_template,
-        )
-        fig = aon_layout(fig)
-        fig.update_layout(showlegend=False, xaxis_title="", yaxis_title="Tasks")
-        st.plotly_chart(fig, width="stretch")
-    else:
-        st.info("No data for selected filters.")
+    st.dataframe(
+        pivot,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Team Member": st.column_config.TextColumn(width="medium"),
+            "To Do":       st.column_config.NumberColumn(width="small"),
+            "In Progress": st.column_config.NumberColumn(width="small"),
+            "In Review":   st.column_config.NumberColumn(width="small"),
+            "Blocked":     st.column_config.NumberColumn(width="small"),
+            "Done":        st.column_config.NumberColumn(width="small"),
+            "Total":       st.column_config.NumberColumn(width="small"),
+            "% Done":      st.column_config.TextColumn(width="small"),
+        },
+    )
+else:
+    st.info("No data for selected filters.")
 
-with ch2:
-    st.markdown("**Task Status Distribution**")
+st.divider()
+
+# ── Charts ────────────────────────────────────────────────────────────────────
+st.markdown('<p class="aon-section-title">Status Overview</p>', unsafe_allow_html=True)
+
+ch_left, ch_right = st.columns([1, 2])
+
+with ch_left:
+    st.markdown("**Status Distribution**")
     if not fdf.empty:
         status_dist = fdf["state"].value_counts().reset_index()
         status_dist.columns = ["State", "Count"]
+        # Muted single-family palette
+        MUTED_STATE = {
+            "To Do":       "#BDBDBD",
+            "In Progress": "#5B8DB8",
+            "In Review":   "#C8956C",
+            "Blocked":     "#B85C5C",
+            "Done":        "#5B9A78",
+        }
         fig = px.pie(
-            status_dist, names="State", values="Count", hole=0.5,
-            color="State", color_discrete_map=STATE_COLORS,
+            status_dist, names="State", values="Count", hole=0.55,
+            color="State", color_discrete_map=MUTED_STATE,
             template=plotly_template,
         )
-        fig = aon_layout(fig)
-        fig.update_traces(textposition="inside", textinfo="percent+label",
-                          textfont_size=10)
+        fig = aon_layout(fig, height=300)
+        fig.update_traces(
+            textposition="inside", textinfo="percent+label",
+            textfont_size=10,
+            marker=dict(line=dict(color="#FFFFFF", width=2)),
+        )
+        fig.update_layout(showlegend=False)
         st.plotly_chart(fig, width="stretch")
     else:
         st.info("No data for selected filters.")
 
-with ch3:
-    st.markdown("**Tasks by Priority**")
-    if not fdf.empty:
-        pc = (
-            fdf["priority_label"]
-            .value_counts()
-            .reindex(PRIORITY_ORDER, fill_value=0)
-            .reset_index()
-        )
-        pc.columns = ["Priority", "Count"]
-        fig = px.bar(
-            pc, x="Priority", y="Count", color="Priority",
-            color_discrete_map=PRIORITY_COLORS,
-            template=plotly_template,
-        )
-        fig = aon_layout(fig)
-        fig.update_layout(showlegend=False, xaxis_title="", yaxis_title="Tasks")
-        st.plotly_chart(fig, width="stretch")
-    else:
-        st.info("No data for selected filters.")
-
-# ── Charts – row 2 ────────────────────────────────────────────────────────────
-ch4, ch5 = st.columns(2)
-
-with ch4:
-    st.markdown("**Task Type Breakdown**")
-    if not fdf.empty:
-        tc = fdf["task_type"].value_counts().reset_index()
-        tc.columns = ["Task Type", "Count"]
-        fig = px.bar(
-            tc, x="Count", y="Task Type", orientation="h",
-            color="Task Type",
-            color_discrete_sequence=AON_CHART_SEQ,
-            template=plotly_template,
-        )
-        fig = aon_layout(fig, height=340)
-        fig.update_layout(showlegend=False, yaxis_title="", xaxis_title="Tasks")
-        st.plotly_chart(fig, width="stretch")
-    else:
-        st.info("No data for selected filters.")
-
-with ch5:
-    st.markdown("**Task Status by Member (Stacked)**")
+with ch_right:
+    st.markdown("**Status by Team Member**")
     if not fdf.empty:
         ms = (
             fdf.groupby(["member_name", "state"])
@@ -423,14 +413,24 @@ with ch5:
             .reset_index(name="Count")
         )
         ms["label"] = ms["member_name"].str.split().str[0]
+        MUTED_STATE = {
+            "To Do":       "#BDBDBD",
+            "In Progress": "#5B8DB8",
+            "In Review":   "#C8956C",
+            "Blocked":     "#B85C5C",
+            "Done":        "#5B9A78",
+        }
         fig = px.bar(
             ms, x="label", y="Count", color="state",
-            barmode="stack", color_discrete_map=STATE_COLORS,
+            barmode="stack", color_discrete_map=MUTED_STATE,
             template=plotly_template,
         )
-        fig = aon_layout(fig, height=340)
+        fig = aon_layout(fig, height=300)
         fig.update_layout(
-            xaxis_title="", yaxis_title="Tasks", legend_title="State",
+            xaxis_title="", yaxis_title="Tasks",
+            legend_title="State",
+            legend=dict(orientation="v", font=dict(size=10)),
+            bargap=0.35,
         )
         st.plotly_chart(fig, width="stretch")
     else:
