@@ -223,21 +223,6 @@ df = load_data()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown(
-        """
-        <div style="padding:16px 0 8px 0; border-bottom:1px solid #3A3A3A;
-                    margin-bottom:16px;">
-            <span style="font-size:1.9rem; font-weight:800; letter-spacing:0.05em;
-                         color:#C8102E;">AON</span>
-            <span style="font-size:0.65rem; color:#AAAAAA; display:block;
-                         letter-spacing:0.12em; text-transform:uppercase;
-                         margin-top:-2px;">QA Team Dashboard</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.divider()
     st.markdown('<p class="aon-section-title">Filters</p>', unsafe_allow_html=True)
 
     all_members = sorted(df["member_name"].unique().tolist())
@@ -376,30 +361,32 @@ st.markdown('<p class="aon-section-title">Status Overview</p>', unsafe_allow_htm
 ch_left, ch_right = st.columns([1, 2])
 
 with ch_left:
-    st.markdown("**Status Distribution**")
+    st.markdown("**Task Type Breakdown**")
     if not fdf.empty:
-        status_dist = fdf["state"].value_counts().reset_index()
-        status_dist.columns = ["State", "Count"]
-        # Muted single-family palette
-        MUTED_STATE = {
-            "To Do":       "#BDBDBD",
-            "In Progress": "#5B8DB8",
-            "In Review":   "#C8956C",
-            "Blocked":     "#B85C5C",
-            "Done":        "#5B9A78",
-        }
-        fig = px.pie(
-            status_dist, names="State", values="Count", hole=0.55,
-            color="State", color_discrete_map=MUTED_STATE,
+        tc = fdf["task_type"].value_counts().reset_index()
+        tc.columns = ["Task Type", "Count"]
+        fig = px.bar(
+            tc.sort_values("Count"),
+            x="Count", y="Task Type", orientation="h",
+            color="Count",
+            color_continuous_scale=["#BDBDBD", "#5B8DB8", "#0D1B2E"],
             template=plotly_template,
         )
         fig = aon_layout(fig, height=300)
-        fig.update_traces(
-            textposition="inside", textinfo="percent+label",
-            textfont_size=10,
-            marker=dict(line=dict(color="#FFFFFF", width=2)),
+        fig.update_layout(
+            showlegend=False,
+            coloraxis_showscale=False,
+            yaxis_title="", xaxis_title="Tasks",
+            yaxis=dict(tickfont=dict(size=11)),
         )
-        fig.update_layout(showlegend=False)
+        fig.update_traces(
+            hovertemplate="<b>%{y}</b><br>%{x} task(s)<extra></extra>",
+            hoverlabel=dict(
+                bgcolor="#1A1A1A", bordercolor="#C8102E",
+                font=dict(family="Inter, Segoe UI, Arial, sans-serif",
+                          size=12, color="#FFFFFF"),
+            ),
+        )
         st.plotly_chart(fig, width="stretch")
     else:
         st.info("No data for selected filters.")
