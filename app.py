@@ -358,35 +358,44 @@ st.divider()
 # ── Charts ────────────────────────────────────────────────────────────────────
 st.markdown('<p class="aon-section-title">Status Overview</p>', unsafe_allow_html=True)
 
-ch_left, ch_right = st.columns([1, 2])
+ch_left, ch_right = st.columns([1, 1])
 
 with ch_left:
     st.markdown("**Task Type Breakdown**")
     if not fdf.empty:
         tc = fdf["task_type"].value_counts().reset_index()
         tc.columns = ["Task Type", "Count"]
-        fig = px.bar(
-            tc.sort_values("Count"),
-            x="Count", y="Task Type", orientation="h",
-            color="Count",
-            color_continuous_scale=["#BDBDBD", "#5B8DB8", "#0D1B2E"],
+        total_tasks = tc["Count"].sum()
+        tc["Percentage"] = (tc["Count"] / total_tasks * 100).round(1)
+
+        TREEMAP_COLORS = [
+            "#0D1B2E", "#1B75BC", "#2D8653", "#E87722",
+            "#6C3483", "#C8102E", "#17A589", "#E8A838",
+        ]
+
+        fig = px.treemap(
+            tc,
+            path=["Task Type"],
+            values="Count",
+            color="Task Type",
+            color_discrete_sequence=TREEMAP_COLORS,
             template=plotly_template,
-        )
-        fig = aon_layout(fig, height=300)
-        fig.update_layout(
-            showlegend=False,
-            coloraxis_showscale=False,
-            yaxis_title="", xaxis_title="Tasks",
-            yaxis=dict(tickfont=dict(size=11)),
+            custom_data=["Count", "Percentage"],
         )
         fig.update_traces(
-            hovertemplate="<b>%{y}</b><br>%{x} task(s)<extra></extra>",
+            texttemplate="<b>%{label}</b><br>%{customdata[0]}<br>(%{customdata[1]}%)",
+            textfont=dict(size=13, color="white"),
+            textposition="middle center",
+            marker=dict(line=dict(width=2, color=AON_WHITE)),
+            hovertemplate="<b>%{label}</b><br>%{customdata[0]} task(s) · %{customdata[1]}%<extra></extra>",
             hoverlabel=dict(
                 bgcolor="#1A1A1A", bordercolor="#C8102E",
                 font=dict(family="Inter, Segoe UI, Arial, sans-serif",
                           size=12, color="#FFFFFF"),
             ),
         )
+        fig = aon_layout(fig, height=300)
+        fig.update_layout(showlegend=False)
         st.plotly_chart(fig, width="stretch")
     else:
         st.info("No data for selected filters.")
