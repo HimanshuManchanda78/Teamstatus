@@ -1,5 +1,8 @@
 import html as html_lib
 import json
+import os
+import re
+import requests
 from datetime import date
 from pathlib import Path
 
@@ -183,6 +186,164 @@ AON_CHART_SEQ = [
     "#1B75BC", "#E87722", "#2D8653", "#6C3483",
 ]
 
+# ── Azure DevOps configuration ────────────────────────────────────────────────
+AZURE_ORG        = os.environ.get("AZURE_DEVOPS_ORG",     "aononedevops")
+AZURE_PROJECT    = os.environ.get("AZURE_DEVOPS_PROJECT", "ACIA_Health_Solutions_App")
+AZURE_QUERY_NAME = os.environ.get("AZURE_DEVOPS_QUERY",   "")   # set via env var
+AZURE_PAT        = os.environ.get("AZURE_DEVOPS_PAT",     "")
+
+# Azure DevOps state → dashboard state mapping
+AZURE_STATE_MAP = {
+    "new": "To Do", "proposed": "To Do", "to do": "To Do",
+    "active": "In Progress", "in progress": "In Progress", "committed": "In Progress",
+    "in review": "In Review", "in testing": "In Review",
+    "blocked": "Blocked", "on hold": "Blocked",
+    "done": "Done", "closed": "Done", "resolved": "Done", "completed": "Done",
+}
+
+# ── Role mapping (hardcoded — update with your team members' actual roles) ────
+MEMBER_ROLES: dict[str, str] = {
+    # "Full Name As In Azure DevOps": "Role Title",
+    # Example:
+    # "Alice Johnson": "Senior QA Engineer",
+    # "Bob Smith":     "QA Engineer",
+}
+
+# ── Azure DevOps data fetch ───────────────────────────────────────────────────
+def fetch_and_save_azure_data() -> tuple[bool, str]:
+    """Fetch tasks from Azure DevOps via saved query and overwrite sample_data.json.
+
+    Returns (success: bool, message: str).
+    """
+    if not AZURE_PAT:
+        return False, "AZURE_DEVOPS_PAT environment variable is not set."
+    if not AZURE_QUERY_NAME:
+        return False, "AZURE_DEVOPS_QUERY environment variable is not set."
+
+    auth = ("", AZURE_PAT)
+    base = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}"
+
+    # Step 1 – find saved query ID by name
+    try:
+        resp = requests.get(
+            f"{base}/_apis/wit/queries?$depth=2&$expand=all&api-version=7.0",
+            auth=auth, timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        return False, f"Failed to reach Azure DevOps: {exc}"
+
+    def _find_query(node: dict) -> str | None:
+        if node.get("name") == AZURE_QUERY_NAME:
+            return node["id"]
+        for child in node.get("children", []) + node.get("value", []):
+            found = _find_query(child)
+            if found:
+                return found
+        return None
+
+    query_id = _find_query(resp.json())
+    if not query_id:
+        return False, f"Query '{AZURE_QUERY_NAME}' not found in Azure DevOps."
+
+    # Step 2 – run the query to get work item IDs
+    try:
+        resp = requests.get(
+            f"{base}/_apis/wit/wiql/{query_id}?api-version=7.0",
+            auth=auth, timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        return False, f"Failed to execute query: {exc}"
+
+    work_item_refs = resp.json().get("workItems", [])
+    if not work_item_refs:
+        return False, "Query returned no work items."
+
+    ids = [item["id"] for item in work_item_refs]
+
+    # Step 3 – fetch work item details in batches of 200
+    fields = ",".join([
+        "System.Id", "System.Title", "System.State", "System.AssignedTo",
+        "System.TeamProject", "System.AreaPath", "System.IterationPath",
+        "System.Description", "Microsoft.VSTS.Common.Priority",
+        "System.WorkItemType", "System.CreatedDate", "System.ChangedDate",
+    ])
+    all_items: list[dict] = []
+    try:
+        for i in range(0, len(ids), 200):
+            batch = ids[i : i + 200]
+            ids_str = ",".join(str(wid) for wid in batch)
+            resp = requests.get(
+                f"{base}/_apis/wit/workitems?ids={ids_str}&fields={fields}&api-version=7.0",
+                auth=auth, timeout=30,
+            )
+            resp.raise_for_status()
+            all_items.extend(resp.json().get("value", []))
+    except requests.RequestException as exc:
+        return False, f"Failed to fetch work item details: {exc}"
+
+    # Step 4 – transform and group by assigned team member
+    members_map: dict[str, dict] = {}
+    for item in all_items:
+        f = item.get("fields", {})
+
+        assigned_raw = f.get("System.AssignedTo", {})
+        member_name = (
+            assigned_raw.get("displayName", "Unassigned")
+            if isinstance(assigned_raw, dict)
+            else (str(assigned_raw) if assigned_raw else "Unassigned")
+        )
+
+        project_name = f.get("System.TeamProject", AZURE_PROJECT)
+        project_id   = "".join(w[0].upper() for w in project_name.split() if w)
+
+        raw_state = f.get("System.State", "To Do")
+        state     = AZURE_STATE_MAP.get(raw_state.lower(), raw_state)
+
+        raw_priority = f.get("Microsoft.VSTS.Common.Priority")
+        priority     = int(raw_priority) if raw_priority is not None else 3
+
+        created = (f.get("System.CreatedDate") or "")[:10]
+        updated = (f.get("System.ChangedDate") or "")[:10]
+
+        # Strip HTML tags from description
+        raw_desc    = f.get("System.Description") or ""
+        description = re.sub(r"<[^>]+>", " ", raw_desc).strip()
+
+        task = {
+            "id":           str(f.get("System.Id", "")),
+            "summary":      f.get("System.Title", ""),
+            "assigned_to":  member_name,
+            "state":        state,
+            "area":         f.get("System.AreaPath", ""),
+            "iteration":    f.get("System.IterationPath", ""),
+            "description":  description,
+            "priority":     priority,
+            "task_type":    f.get("System.WorkItemType", "Task"),
+            "created_date": created,
+            "updated_date": updated,
+        }
+
+        if member_name not in members_map:
+            members_map[member_name] = {
+                "id":         f"TM{len(members_map) + 1:03d}",
+                "name":       member_name,
+                "role":       MEMBER_ROLES.get(member_name, "QA Engineer"),
+                "project":    project_name,
+                "project_id": project_id,
+                "tasks":      [],
+            }
+        members_map[member_name]["tasks"].append(task)
+
+    # Step 5 – persist to sample_data.json
+    data = {"team_members": list(members_map.values())}
+    _DATA_FILE.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return True, f"Fetched {len(all_items)} task(s) for {len(members_map)} team member(s)."
+
+
 # ── Data loading ──────────────────────────────────────────────────────────────
 _DATA_FILE = Path(__file__).parent / "sample_data.json"
 
@@ -281,6 +442,17 @@ with col_title:
         unsafe_allow_html=True,
     )
 with col_date:
+    _, refresh_btn_col = st.columns([1, 1])
+    with refresh_btn_col:
+        if st.button("🔄 Refresh Data", use_container_width=True):
+            with st.spinner("Fetching data from Azure DevOps…"):
+                ok, msg = fetch_and_save_azure_data()
+            if ok:
+                st.success(msg)
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(msg)
     date_range = st.date_input(
         "Date Range",
         value=(min_d, max_d),
@@ -368,6 +540,40 @@ with ch_left:
         total_tasks = tc["Count"].sum()
         tc["Percentage"] = (tc["Count"] / total_tasks * 100).round(1)
 
+        # Build per-task-type done/remaining counts and task-level ID+state lines
+        def _task_lines(grp):
+            STATE_ICON = {
+                "Done": "✔",
+                "In Progress": "▶",
+                "In Review": "◎",
+                "Blocked": "✖",
+                "To Do": "○",
+            }
+            STATE_ORDER = {"Done": 0, "In Progress": 1, "In Review": 2, "Blocked": 3, "To Do": 4}
+            sorted_grp = grp.assign(_ord=grp["state"].map(STATE_ORDER).fillna(5)).sort_values("_ord")
+            lines = []
+            for _, row in sorted_grp.iterrows():
+                icon = STATE_ICON.get(row["state"], "·")
+                summary = row["summary"][:55] + "…" if len(row["summary"]) > 55 else row["summary"]
+                lines.append(
+                    f"{icon} <b>{row['id']}</b>  [{row['state']}]<br>"
+                    f"&nbsp;&nbsp;&nbsp;{summary}<br>"
+                    f"&nbsp;&nbsp;&nbsp;👤 {row['member_name']}  &nbsp;·&nbsp; 📁 {row['project']}"
+                )
+            return "<br>".join(lines)
+
+        type_detail = (
+            fdf.groupby("task_type")
+            .apply(lambda g: pd.Series({
+                "Done":      int((g["state"] == "Done").sum()),
+                "Remaining": int((g["state"] != "Done").sum()),
+                "task_lines": _task_lines(g),
+            }), include_groups=False)
+            .reset_index()
+            .rename(columns={"task_type": "Task Type"})
+        )
+        tc = tc.merge(type_detail, on="Task Type")
+
         TREEMAP_COLORS = [
             "#0D1B2E", "#1B75BC", "#2D8653", "#E87722",
             "#6C3483", "#C8102E", "#17A589", "#E8A838",
@@ -380,18 +586,28 @@ with ch_left:
             color="Task Type",
             color_discrete_sequence=TREEMAP_COLORS,
             template=plotly_template,
-            custom_data=["Count", "Percentage"],
+            custom_data=["Count", "Percentage", "Done", "Remaining", "task_lines"],
         )
         fig.update_traces(
             texttemplate="<b>%{label}</b><br>%{customdata[0]}<br>(%{customdata[1]}%)",
             textfont=dict(size=13, color="white"),
             textposition="middle center",
             marker=dict(line=dict(width=2, color=AON_WHITE)),
-            hovertemplate="<b>%{label}</b><br>%{customdata[0]} task(s) · %{customdata[1]}%<extra></extra>",
+            hovertemplate=(
+                "<b>%{label}</b><br>"
+                "<span style='font-size:11px;'>%{customdata[0]} task(s) &nbsp;·&nbsp; %{customdata[1]}% of total</span><br>"
+                "──────────────────────<br>"
+                "<span style='color:#5B9A78;'>✔ Done: %{customdata[2]}</span> &nbsp;|&nbsp; "
+                "<span style='color:#E87722;'>Remaining: %{customdata[3]}</span><br>"
+                "──────────────────────<br>"
+                "%{customdata[4]}"
+                "<extra></extra>"
+            ),
             hoverlabel=dict(
                 bgcolor="#1A1A1A", bordercolor="#C8102E",
                 font=dict(family="Inter, Segoe UI, Arial, sans-serif",
                           size=12, color="#FFFFFF"),
+                align="left",
             ),
         )
         fig = aon_layout(fig, height=300)
